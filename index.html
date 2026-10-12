@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GAS Editor</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:#111827;color:#e5e7eb;display:flex;flex-direction:column;height:100dvh}
+header{padding:8px;background:#1f2937}
+details summary{cursor:pointer;padding:4px 0;font-weight:600}
+input,select,button,textarea{font:inherit;border-radius:8px;border:1px solid #374151;background:#0b1220;color:#e5e7eb}
+input,select{width:100%;padding:8px;margin:3px 0}
+.row{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0}
+button{padding:8px 10px;background:#2563eb;border:0;color:#fff}
+button.g{background:#374151}
+button.r{background:#dc2626}
+button.o{background:#16a34a}
+#keys button{padding:6px 11px;background:#374151;font-family:monospace}
+#ta{flex:1;width:100%;padding:10px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:14px;line-height:1.45;resize:none;white-space:pre;overflow:auto;tab-size:2;border-radius:0}
+#st{padding:6px 8px;font-size:13px;background:#1f2937;min-height:30px}
+</style>
+</head>
+<body>
+<header>
+  <details id="cfg" open>
+    <summary>Cài đặt</summary>
+    <input id="cid" placeholder="OAuth Client ID (xxx.apps.googleusercontent.com)">
+    <input id="sid" placeholder="Script ID hoặc dán link project Apps Script">
+  </details>
+  <div class="row">
+    <button onclick="login()">Đăng nhập</button>
+    <button class="g" onclick="loadRemote()">Tải về</button>
+    <button class="o" onclick="pushRemote()">Đẩy lên</button>
+    <button class="g" onclick="downloadBackup()">Lưu backup</button>
+    <button class="g" onclick="restoreBackup()">Khôi phục</button>
+  </div>
+  <div class="row">
+    <select id="fsel" style="flex:1;min-width:140px;width:auto" onchange="switchFile(this.value)"></select>
+    <button class="g" onclick="newFile()">+ File</button>
+    <button class="g" onclick="renameFile()">Đổi tên</button>
+    <button class="r" onclick="deleteFile()">Xoá</button>
+  </div>
+  <div id="keys" class="row"></div>
+</header>
+<textarea id="ta" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" disabled></textarea>
+<div id="st">Chưa đăng nhập</div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+const $ = id => document.getElementById(id);
+const EXT = {SERVER_JS:'.gs', HTML:'.html', JSON:'.json'};
+let token = null, tokenExp = 0, files = [], cur = null;
+
+/* ---------- tiện ích ---------- */
+function say(m){ $('st').textContent = m; }
+function sid(){
+  const m = $('sid').value.match(/[-\w]{25,}/);
+  return m ? m[0] : '';
+}
+function fname(f){ return f.type==='JSON' && f.name==='appsscript' ? 'appsscript.json' : f.name + EXT[f.type]; }
+function parseName(n){
+  n = n.trim();
+  if (/\.html$/i.test(n)) return {name:n.replace(/\.html$/i,''), type:'HTML'};
+  if (/\.json$/i.test(n)) return {name:n.replace(/\.json$/i,''), type:'JSON'};
+  return {name:n.replace(/\.(gs|js)$/i,''), type:'SERVER_JS'};
+}
+function clean(arr){ return arr.map(f => ({name:f.name, type:f.type, source:f.source || ''})); }
+
+/* ---------- lưu cài đặt + bản nháp ---------- */
+function saveCfg(){ localStorage.gas_cid = $('cid').value.trim(); localStorage.gas_sid = $('sid').value.trim(); }
+function saveDraft(){
+  syncCur();
+  try { localStorage.gas_draft = JSON.stringify(clean(files)); } catch(e){}
+}
+function syncCur(){ if (cur !== null && files[cur]) files[cur].source = $('ta').value; }
+
+/* ---------- hiển thị ---------- */
+function render(){
+  const s = $('fsel'); s.innerHTML = '';
+  files.forEach((f,i) => {
+    const o = document.createElement('option');
+    o.value = i; o.textContent = fname(f); s.appendChild(o);
+  });
+  if (cur === null || !files[cur]) cur = files.length ? 0 : null;
+  if (cur !== null) s.value = cur;
+  $('ta').value = cur !== null ? files[cur].source : '';
+  $('ta').disabled = cur === null;
+}
+function switchFile(i){ syncCur(); cur = +i; $('ta').value = files[cur].source; }
+
+/* ---------- đăng nhập ---------- */
+function login(){
+  const cid = $('cid').value.trim();
+  if (!cid) return say('Hãy nhập Client ID trước');
+  if (!window.google || !google.accounts) return say('Thư viện Google chưa tải xong, thử lại sau vài giây');
+  saveCfg();
+  const tc = google.accounts.oauth2.initTokenClient({
+    client_id: cid,
+    scope: 'https://www.googleapis.com/auth/script.projects',
+    callback: r => {
+      if (r.error) return say('Lỗi đăng nhập: ' + r.error);
+      token = r.access_token;
+      tokenExp = Date.now() + (r.expires_in - 60) * 1000;
+      say('Đã đăng nhập. Bấm "Tải về" để lấy code từ Apps Script.');
+    }
+  });
+  tc.requestAccessToken();
+}
+
+async function api(method, body){
+  if (!token || Date.now() > tokenExp) throw new Error('Chưa đăng nhập hoặc phiên hết hạn, bấm "Đăng nhập"');
+  if (!sid()) throw new Error('Chưa có Script ID');
+  const r = await fetch('https://script.googleapis.com/v1/projects/' + sid() + '/content', {
+    method,
+    headers: {Authorization:'Bearer ' + token, 'Content-Type':'application/json'},
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+  return j;
+}
+
+/* ---------- tải về / đẩy lên ---------- */
+async function loadRemote(){
+  try {
+    syncCur();
+    if (files.length && !confirm('Bản đang soạn sẽ bị thay bằng code trên Apps Script. Tiếp tục?')) return;
+    saveCfg(); say('Đang tải...');
+    const j = await api('GET');
+    files = clean(j.files || []); cur = null; render(); saveDraft();
+    say('Đã tải ' + files.length + ' file từ Apps Script.');
+  } catch(e){ say('Lỗi: ' + e.message); }
+}
+
+async function pushRemote(){
+  try {
+    syncCur();
+    if (!files.length) return say('Chưa có file nào để đẩy');
+    if (!files.some(f => f.name==='appsscript' && f.type==='JSON'))
+      return say('Thiếu file appsscript.json. Hãy "Tải về" trước hoặc tạo file này.');
+    if (!confirm('Ghi đè TOÀN BỘ code trên Apps Script bằng ' + files.length + ' file đang soạn?')) return;
+    say('Đang sao lưu bản hiện tại trên Apps Script...');
+    const old = await api('GET');
+    try { localStorage.gas_backup = JSON.stringify({time:new Date().toISOString(), files:clean(old.files||[])}); } catch(e){}
+    say('Đang đẩy lên...');
+    await api('PUT', {files: clean(files)});
+    saveDraft();
+    say('Đã đẩy lên lúc ' + new Date().toLocaleTimeString() + '. Nhớ Deploy phiên bản mới nếu dùng web app.');
+  } catch(e){ say('Lỗi: ' + e.message); }
+}
+
+/* ---------- backup ---------- */
+function downloadBackup(){
+  syncCur();
+  const blob = new Blob([JSON.stringify({time:new Date().toISOString(), files:clean(files)}, null, 2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'gas-backup-' + Date.now() + '.json';
+  a.click();
+  say('Đã tạo file backup.');
+}
+function restoreBackup(){
+  try {
+    const b = JSON.parse(localStorage.gas_backup || 'null');
+    if (!b) return say('Chưa có bản sao lưu nào (được tạo tự động trước mỗi lần đẩy lên).');
+    if (!confirm('Nạp lại bản Apps Script trước lần đẩy gần nhất (' + b.time + ') vào trình soạn? Chưa đẩy lên cho đến khi bạn bấm "Đẩy lên".')) return;
+    files = b.files; cur = null; render(); saveDraft();
+    say('Đã nạp bản sao lưu vào trình soạn.');
+  } catch(e){ say('Lỗi: ' + e.message); }
+}
+
+/* ---------- quản lý file ---------- */
+function newFile(){
+  const n = prompt('Tên file (vd: Code.gs, admin.html):');
+  if (!n || !n.trim()) return;
+  const p = parseName(n);
+  if (files.some(f => f.name===p.name && f.type===p.type)) return say('File đã tồn tại');
+  syncCur();
+  files.push({name:p.name, type:p.type, source:''});
+  cur = files.length - 1; render(); saveDraft();
+}
+function renameFile(){
+  if (cur === null) return;
+  const f = files[cur];
+  if (f.name==='appsscript' && f.type==='JSON') return say('Không đổi tên appsscript.json');
+  const n = prompt('Tên mới:', fname(f));
+  if (!n || !n.trim()) return;
+  const p = parseName(n);
+  syncCur(); f.name = p.name; f.type = p.type; render(); saveDraft();
+}
+function deleteFile(){
+  if (cur === null) return;
+  const f = files[cur];
+  if (f.name==='appsscript' && f.type==='JSON') return say('Không nên xoá appsscript.json');
+  if (!confirm('Xoá ' + fname(f) + '?')) return;
+  files.splice(cur, 1); cur = null; render(); saveDraft();
+}
+
+/* ---------- phím tắt cho điện thoại ---------- */
+function insertText(t){
+  const ta = $('ta'); if (ta.disabled) return;
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  ta.value = ta.value.slice(0, s) + t + ta.value.slice(e);
+  ta.selectionStart = ta.selectionEnd = s + t.length;
+  ta.focus(); saveDraft();
+}
+['  ','{','}','(',')','[',']',';','"',"'",'`','=>','${','\\n'].forEach(k => {
+  const b = document.createElement('button');
+  b.textContent = k === '  ' ? 'Tab' : k;
+  b.onmousedown = e => e.preventDefault();
+  b.onclick = () => insertText(k === '\\n' ? '\\n' : k);
+  $('keys').appendChild(b);
+});
+
+/* ---------- khởi động ---------- */
+$('ta').addEventListener('input', saveDraft);
+$('ta').addEventListener('keydown', e => {
+  if (e.key === 'Tab') { e.preventDefault(); insertText('  '); }
+});
+$('cid').addEventListener('change', saveCfg);
+$('sid').addEventListener('change', saveCfg);
+$('cid').value = localStorage.gas_cid || '';
+$('sid').value = localStorage.gas_sid || '';
+if (localStorage.gas_cid && localStorage.gas_sid) $('cfg').open = false;
+try {
+  const d = JSON.parse(localStorage.gas_draft || 'null');
+  if (d && d.length) { files = d; render(); say('Đã nạp bản nháp lần trước. Đăng nhập để tải về hoặc đẩy lên.'); }
+} catch(e){}
+</script>
+</body>
+</html>
