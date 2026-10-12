@@ -97,7 +97,7 @@ function login(){
   saveCfg();
   const tc = google.accounts.oauth2.initTokenClient({
     client_id: cid,
-    scope: 'https://www.googleapis.com/auth/script.projects',
+    scope: 'https://www.googleapis.com/auth/script.projects https://www.googleapis.com/auth/script.deployments https://www.googleapis.com/auth/userinfo.email',
     callback: r => {
       if (r.error) return say('Lỗi đăng nhập: ' + r.error);
       token = r.access_token;
@@ -228,5 +228,9 @@ try {
   if (d && d.length) { files = d; render(); say('Đã nạp bản nháp lần trước. Đăng nhập để tải về hoặc đẩy lên.'); }
 } catch(e){}
 </script>
+<script src="modkit.js"></script>
+<script src="deploy.js"></script>
+<script src="props.js"></script>
+<script src="filetools.js"></script>
 </body>
 </html>
